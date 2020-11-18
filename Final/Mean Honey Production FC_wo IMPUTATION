@@ -1,0 +1,129 @@
+library(stats)
+library(forecast)
+library(fBasics)
+library(astsa)
+library(data.table)
+library(dplyr)
+library(normwhn.test)
+
+# Read the file
+folder_path <- "C:/Users/Umut Varol/Desktop/IE/DATA VISUALIZATION/Assignment #3/Data"
+dataset <- read.csv(file = file.path(folder_path,"honeyproduction.csv"),header = T,sep = ",",dec = ".")
+
+# Cast the anntime column to date
+dataset$year <- format(as.Date(strptime(dataset$year,format = "%Y")),"%Y")
+
+# Plot the total production per year
+yearly_prod <- summarise(group_by(dataset,year),mean(totalprod))
+yearly_prod <- ts(yearly_prod$`mean(totalprod)`,start = c(1998),frequency = 1)
+
+
+# Plot timeseries, acf and pacf
+windows()
+par(mfrow=c(3,1))
+ts.plot(yearly_prod)
+acf(yearly_prod)
+pacf(yearly_prod)
+
+
+# Check the diff needed for stationarity in the mean
+ndiffs(yearly_prod,alpha=0.05,test = "adf")
+
+dif_yearly_prod <- diff(yearly_prod,1)
+windows()
+par(mfrow=c(3,1))
+ts.plot(dif_yearly_prod)
+acf(dif_yearly_prod)
+pacf(dif_yearly_prod) # Uncorrelated.
+
+#### ARIMA (0,1,0) ####
+fit_1 <- auto.arima(yearly_prod)
+fit_1 # Best fit found is ARIMA(0,1,0) (Also found from the acf and pacf)
+SSE_ARIMA <- sum(sum(residuals(fit_1)^2))
+
+t.test(residuals(fit_1)) # p_value = 0.3829 -> Fail to reject Ho, residuals have 0 mean.
+Box.test(residuals(fit_1)) # p-value = 0.1202 -> Fail to reject Ho, residuals are uncorrelated.
+whitenoise.test(residuals(fit_1)) # p-value = 0.8317486 -> Fail to reject Ho, residuals are WN.
+
+# Plot 5 year the forecast
+sarima.for(yearly_prod,n.ahead = 5,0,1,0,0,0,0,S = 1)
+
+
+#### HOLT WINTER'S  ####
+
+# Since our time series can be described with an additive model with a general decreasing trend 
+# and no seasonality, we can use Holt's exponential smoothing to make short-term forecasts by using gamma = 0 (which controls seasonality).
+# Smoothing is controlled by two parameters, alpha, for the estimate of the level at the current time point, 
+# and beta for the estimate of the slope b of the trend component at the current time point. 
+# As with simple exponential smoothing, the paramters alpha and beta have values between 0 and 1, and values that are close to 0 mean that little weight is placed on the most recent observations when making forecasts of future values.
+
+fit_2 <- HoltWinters(yearly_prod, gamma = FALSE,l.start=5105093, b.start=5105093-4706674)
+plot(fit_2)
+FC_3 <- forecast(fit_2, h=5)
+
+t.test(residuals(fit_2)) # p_value = 0.2499 -> Fail to reject Ho, residuals have 0 mean.
+Box.test(residuals(fit_2)) # p-value = 0.7045 -> Fail to reject Ho, residuals are uncorrelated.
+whitenoise.test(residuals(fit_2)) # p-value = 0.2648586 -> Fail to reject Ho, residuals are WN.
+shapiro.test(residuals(fit_2)) # p-value = 0.9822 -> Fail to reject Ho, residuals are normally distributed.
+
+
+
+#### ROLLING SCHEME FOR POTENTIAL MODELS ####
+
+# To compare more models, expand the potential_models list by adding the model with the same label as the name
+
+potential_models = list("fit_1"=fit_1,"fit_2"=fit_2)
+
+n <- length(yearly_prod)
+n_estimation <- 10
+n_forecast <- n - n_estimation
+horizon <- 5 # number of periods ahead
+n_models <- length(potential_models)
+
+predictions <- matrix(0, nrow = n_forecast, ncol = horizon)
+real <- matrix(0, nrow = n_forecast, ncol=1)
+real <- yearly_prod[(n_estimation + 1) : n] 
+MSFE <- matrix(0, nrow = horizon, ncol= n_models)
+colnames(MSFE) <- names(potential_models)
+MAPE <- matrix(0, nrow = horizon, ncol= n_models)
+colnames(MAPE) <- names(potential_models)
+
+# Preparing an empty matrix for plots, to be filled with predcitions in the loop
+graph_preds <- matrix(0, nrow = n_forecast, ncol= n_models*horizon)
+colnames(graph_preds) <- paste(sort(rep(names(potential_models),horizon)),rep(1:horizon,n_models),sep="_")
+
+
+counter <- 1
+for (fit in potential_models){
+  for (p_ahead in 1:horizon) {
+    for (i in 1:n_forecast) {
+      y <- yearly_prod[i:(n_estimation - p_ahead + i)];
+      if((class(fit)[2]=="ARIMA") & !is.na(class(fit)[2])){
+        # Get the initial fitted model's order
+        fit_new <- arima(y,order=c(0,1,0),seasonal = list(order=c(0,0,0),period = 1))
+        predictt <-stats::predict(fit_new, n.ahead = p_ahead);
+        predictions[i, p_ahead]<- predictt$pred[p_ahead];
+      }
+      else{
+        fit_new <- HoltWinters(y, gamma = FALSE,l.start=5105093, b.start=5105093-4706674)
+        predictt <-forecast(fit_new, h = p_ahead);
+        predictions[i, p_ahead]<- predictt$mean[p_ahead];
+      }
+    }
+    error <- real - predictions[, p_ahead];
+    MSFE[p_ahead,counter] <- mean(error^2);
+    MAPE[p_ahead,counter] <- mean(abs(error/real)) *100;
+  }
+  counter <- counter + 1;
+}
+
+# Fit 1 gives better results as Holt-Winter's follow 1 season behind.
+
+
+# Make and plot the forecast for the chosen model.
+# Plot 5 year the forecast
+predictions <- sarima.for(yearly_prod,n.ahead = 5,0,1,0,0,0,0,S = 1)$pred
+windows()
+par(mar = c(4, 4, 5, 5))
+plot(y = as.vector(yearly_prod/(10^6)),x=c(1998:2012),type = "b", pch = 19,xlim=range(1998,2017),ylim=range(2900000/(10^6),max(as.vector(yearly_prod))/(10^6)),col="lightslategray",xlab="Years", ylab="Avg. Honey Prod.(Million)",main="Average Honey Production Realization & 5-Year Forecast in USA",cex.main=1,cex.lab=0.9, cex.axis=0.75)
+lines(y=c(as.vector(yearly_prod/(10^6))[length(as.vector(yearly_prod))],as.vector(predictions/(10^6))),x=c(2012:2017),type = "b", pch = 19,col="brown2")
